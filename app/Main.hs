@@ -1,7 +1,12 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
 
-import Network.Socket
+import Network.Socket as NS
 import Network.Socket.ByteString (recv, sendAll, send)
+
+import Database.SQLite.Simple as SS
+import Database.SQLite.Simple.FromRow
+import Data.Time.Clock (UTCTime, getCurrentTime)
 
 import qualified Data.ByteString as S
 import qualified Control.Exception as E
@@ -9,15 +14,33 @@ import qualified Data.List.NonEmpty as NE
 
 import Control.Concurrent (forkFinally)
 import Control.Monad (forever, unless, void)
-import Control.Exception
 
 import Data.Word (Word32)
 import Data.Maybe (fromMaybe)
-import Data.ByteString.Char8(pack,unpack)
+import Data.ByteString.Char8(pack, unpack)
 
 
 main :: IO ()
 main = putStrLn "..."
+
+data TestField = TestField Int String deriving (Show)
+
+instance FromRow TestField where
+  fromRow = TestField <$> field <*> field
+
+testDB :: IO ()
+testDB = do
+ conn <- open "test.db"
+ -- execute_ conn "CREATE TABLE test (id INTEGER PRIMARY KEY, str text);"
+ putStrLn "printing table test..."
+
+ r <- query_ conn "SELECT * from test" :: IO [TestField]
+ mapM_ print r
+
+ putStrLn "printing table test done, closing..."
+
+ SS.close conn
+
 
 setupServer :: Maybe String -> [Char] -> IO ()
 setupServer mhostN port = runTCPServer mhostN port loop 
@@ -42,20 +65,20 @@ setupServer mhostN port = runTCPServer mhostN port loop
 runTCPServer :: Maybe HostName -> ServiceName -> (Socket -> IO a) -> IO a
 runTCPServer mhost port server = withSocketsDo $ do -- this withSocketDo is for windows, cuz windows is gay
     addr <- resolve
-    E.bracket (open addr) close loop
+    E.bracket (open addr) NS.close loop
 		where
 			resolve = do
 				let hints = defaultHints { addrFlags = [AI_PASSIVE] , addrSocketType = Stream }
 				NE.head <$> getAddrInfo (Just hints) mhost (Just port)
 
-			open addr = E.bracketOnError (openSocket addr) close $ \sock -> do
+			open addr = E.bracketOnError (openSocket addr) NS.close $ \sock -> do
 				setSocketOption sock ReuseAddr 1
 				withFdSocket sock setCloseOnExecIfNeeded
-				bind sock $ addrAddress addr
+				NS.bind sock $ addrAddress addr
 				listen sock 1024
 				return sock
 
-			loop sock = forever $ E.bracketOnError (accept sock) (close . fst) $ \(conn, _peer) -> void $
+			loop sock = forever $ E.bracketOnError (accept sock) (NS.close . fst) $ \(conn, _peer) -> void $
 				-- 'forkFinally' alone is unlikely to fail thus leaking @conn@,
 				-- but 'E.bracketOnError' above will be necessary if some
 				-- non-atomic setups (e.g. spawning a subprocess to handle
@@ -63,8 +86,14 @@ runTCPServer mhost port server = withSocketsDo $ do -- this withSocketDo is for 
 				forkFinally (server conn) (const $ gracefulClose conn 5000)
 
 
--- TODO:
--- send msgs with input typeshit
+-- take input from user, keep taking the input from the user
+-- send this message, sendAll typeshit
+chat :: Socket -> IO ()
+chat s = do
+	putStr "Enter Message: "
+	msg <- getLine
+	sendAll s $ pack msg
+
 
 connectClient :: Maybe String -> [Char] -> IO ()
 connectClient Nothing _ = error "???"
@@ -87,28 +116,17 @@ connectClient mhostName port = withSocketsDo $ do
 				-- Try to connect
 				connect sock (addrAddress addr)
 
-				forever $ loop
+				forever $ loop sock
 				where
-					loop = do
+					loop sock = do
 						msg <- recv sock 1024
 						unless (S.null msg) $ do
 							putStrLn $ "Received from server: " ++ show msg
+						chat sock
+
 
 				-- close sock
 			[] -> putStrLn "Could not resolve address"
-
-
--- handleClient :: Socket -> IO ()
--- handleClient conn = do
---     msg <- recv conn 1024
---     putStrLn $ "Received: " ++ show msg
--- 
---     sendAll conn "Hello, Client!"
-
-
-
-
-
 
 
 --- helper funcs
