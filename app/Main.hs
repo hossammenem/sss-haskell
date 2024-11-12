@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
 import Network.Socket as NS
@@ -11,12 +12,16 @@ import qualified Data.ByteString as S
 import qualified Control.Exception as E
 import qualified Data.List.NonEmpty as NE
 
-import Control.Concurrent (forkFinally)
+import Control.Concurrent (forkFinally, forkIO)
 import Control.Monad (forever, unless, void)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 
 import Data.Maybe (fromMaybe)
 import Data.ByteString.Char8 (pack, unpack)
 import Data.Time.Clock (UTCTime, getCurrentTime)
+
+import System.IO (hFlush, stdout)
+
 
 main :: IO ()
 main = do
@@ -32,41 +37,36 @@ main = do
         getRoom = do 
             putStrLn "\nRoom name: "
             roomName <- getLine
-            joinRoom -- roomName
+            joinRoom
 
 setupServer :: Maybe String -> [Char] -> IO ()
 setupServer mhostN port = runTCPServer mhostN port loop 
-	where
-		loop s = do
-			putStrLn "\n================="
-			putStrLn "Start of a loop"
-			putStrLn "=================\n"
-
-			-- basically what i have in mind is that 
-			-- a socket joins
-			-- we listen for that
-			-- something finally joins!
-			-- send it to all
-			(conn) <- accept s
-
-			unless(null conn) $ do
-				print $ "Handling new socket " ++ show conn
-				sendAll s $ pack "Hi!"
-
-			-- when recievce, echo message back
-			msg <- recv s 1024
-			unless (S.null msg) $ do
-					print $ "Received: " ++ (show . unpack) msg
-					sendAll s msg
-			
-			putStrLn "\n================="
-			putStrLn "end of the loop"
-			putStrLn "=================\n"
-
-			loop s
+    where
+        loop s = forever $ do
+            putStrLn "\n================="
+            putStrLn "Waiting for connection..."
+            putStrLn "=================\n"
+            
+            (clientSock, clientAddr) <- accept s
+            -- Handle each client in a separate thread, so now the accept function doesn't block for all clients
+            void $ forkIO $ handleClient clientSock clientAddr
+            
+handleClient :: Socket -> SockAddr -> IO ()
+handleClient sock addr = do
+    putStrLn $ "New client connected: " ++ show addr
+    sendAll sock $ pack "Hi!"
+    
+    forever $ do
+        msg <- recv sock 1024
+        unless (S.null msg) $ do
+            print $ "Received: " ++ (show . unpack) msg
+            sendAll sock msg
+    `E.catch` \(e :: E.IOException) -> do
+        putStrLn $ "Client disconnected: " ++ show addr
+        NS.close sock
 
 runTCPServer :: Maybe HostName -> ServiceName -> (Socket -> IO a) -> IO a
-runTCPServer mhost port server = withSocketsDo $ do -- this withSocketDo is for windows, cuz windows is gay
+runTCPServer mhost port server = withSocketsDo $ do
     addr <- resolve
     E.bracket (open addr) NS.close loop
     where
@@ -81,48 +81,50 @@ runTCPServer mhost port server = withSocketsDo $ do -- this withSocketDo is for 
             listen sock 1024
             return sock
 
-        loop sock = forever $ E.bracketOnError (accept sock) (NS.close . fst) $ \(conn, _peer) -> void $
-            -- 'forkFinally' alone is unlikely to fail thus leaking @conn@,
-            -- but 'E.bracketOnError' above will be necessary if some
-            -- non-atomic setups (e.g. spawning a subprocess to handle
-            -- @conn@) before proper cleanup of @conn@ is your case
-            forkFinally (server conn) (const $ gracefulClose conn 5000)
+        loop sock = server sock
 
 connectClient :: Maybe String -> [Char] -> IO ()
 connectClient mhostName port = withSocketsDo $ do
     let hints = defaultHints { addrSocketType = Stream }
-
     addrInfos <- getAddrInfo (Just hints) mhostName (Just port)
-
     case addrInfos of
         (addr:_) -> do
-            -- Create socket
             sock <- socket (addrFamily addr) (addrSocketType addr) (addrProtocol addr)
             putStrLn $ "Created socket: " ++ show sock
             putStrLn $ "Address: " ++ show (addrAddress addr)
-
-            -- Try to connect
             connect sock (addrAddress addr)
-
-            forever $ loop sock
-						where
-							loop sock = do
-								chat sock
-
-								msg <- recv sock 1024
-								unless (S.null msg) $ do 
-									putStrLn $ "Received from server: " ++ show msg
-
-					-- close sock
+            
+            -- Create MVar to coordinate output
+            outputLock <- newMVar ()
+            
+            -- Handle receiving in a separate thread
+            void $ forkIO $ forever $ do
+                msg <- recv sock 1024
+                unless (S.null msg) $ do 
+                    withMVar outputLock $ \_ -> do
+                        clearLine
+                        putStrLn $ "Received: " ++ show (unpack msg)
+                        putStr "Enter Message: "
+                        hFlush stdout
+            
+            -- Handle sending in main thread
+            forever $ chatWithLock outputLock sock
+            
         [] -> putStrLn "Could not resolve address"
 
--- take input from user, keep taking the input from the user
--- send this message, sendAll typeshit
-chat :: Socket -> IO ()
-chat s = do
-    putStr "Enter Message: "
+chatWithLock :: MVar () -> Socket -> IO ()
+chatWithLock lock s = do
+    withMVar lock $ \_ -> do
+        putStr "Enter Message: "
+        hFlush stdout
     msg <- getLine
     sendAll s $ pack msg
+
+clearLine :: IO ()
+clearLine = do
+    putStr "\r"           -- Return to start of line
+    putStr (replicate 80 ' ')  -- Clear with spaces
+    putStr "\r"           -- Return to start again
 
 createRoom :: IO ()
 createRoom = error "not implemented"
@@ -130,9 +132,6 @@ createRoom = error "not implemented"
 joinRoom :: IO ()
 joinRoom = error "not implemented"
 
--------------------------
--- DB stuff
--------------------------
 data TestField = TestField Int String deriving (Show)
 
 instance FromRow TestField where
@@ -141,12 +140,8 @@ instance FromRow TestField where
 testDB :: IO ()
 testDB = do
     conn <- open "test.db"
-    -- execute_ conn "CREATE TABLE test (id INTEGER PRIMARY KEY, str text);"
     putStrLn "printing table test..."
-
     r <- query_ conn "SELECT * from test" :: IO [TestField]
     mapM_ print r
-
     putStrLn "printing table test done, closing..."
-
     SS.close conn
