@@ -35,8 +35,7 @@ instance Matoable (Maybe String, String) where
     matoa (Nothing, def) = def
 
 -- here are some examples
--- test :: IO ()
--- test = do
+--  = do
 --     -- Using with just Maybe String
 --     print $ matoa (Just "hello")     -- prints: "hello"
 --     print $ matoa Nothing            -- prints: ""

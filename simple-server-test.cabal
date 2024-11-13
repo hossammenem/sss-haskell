@@ -68,7 +68,7 @@ executable simple-server-test
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.17.2.1, network, bytestring, sqlite-simple, time, containers
+    build-depends:    base ^>=4.17.2.1, network, bytestring, sqlite-simple, time, containers, stm, stm-containers, list-t, exceptions
 
     -- Directories containing source files.
     hs-source-dirs:   app
